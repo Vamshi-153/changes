@@ -1,0 +1,1232 @@
+﻿'use client';
+
+import { useState, useEffect, useRef } from 'react';
+import { db } from '@/firebase/firebaseConfig';
+import { doc, getDoc } from 'firebase/firestore';
+import { AiFillStar } from "react-icons/ai";
+import { collection, getDocs, query, where } from 'firebase/firestore';
+import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
+import { ImagePlus, Film, ShoppingCart, Heart, ChevronLeft, ChevronRight, Plus, Minus, Star, TruckIcon, RotateCcw, Shield, Share2, Copy, Check } from 'lucide-react';
+import { useToast } from '@/hooks/use-toast';
+import { Card } from '@/components/ui/card';
+import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { Label } from '@/components/ui/label';
+import { Textarea } from '@/components/ui/textarea';
+import { Switch } from '@/components/ui/switch';
+import { useAuth } from '@/hooks/auth-context';
+import { useRouter } from 'next/navigation';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import { useCart } from '@/hooks/use-cart';
+import React from 'react';
+import { useWishlist } from '@/hooks/use-wishlist';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Separator } from '@/components/ui/separator';
+import { motion, AnimatePresence } from 'framer-motion';
+import {
+Dialog,
+DialogContent,
+DialogDescription,
+DialogHeader,
+DialogTitle,
+DialogFooter,
+} from "@/components/ui/dialog";
+import ProductReviews from '@/app/reviews/[id]/page'; // adjust the path if needed
+
+
+// Types
+interface Variant {
+id: string;
+name: string;
+options: string[];
+}
+
+interface VariantCombination {
+id: string;
+combinationString: string;
+attributes: Record<string, string>;
+price: number;
+stock: number;
+sku?: string;
+images?: string[];
+thumbnails?: string[];
+}
+
+interface Product {
+id: string;
+name: string;
+description?: string;
+price: number;
+originalPrice?: number;
+stock: number;
+category?: string;
+createdBy?: string;
+aiHint?: string;
+images?: string[];
+thumbnails?: string[];
+videos?: string[];
+hasCustomization?: boolean;
+customizationOptions?: string;
+hasVariants?: boolean;
+variants?: Variant[];
+variantCombinations?: VariantCombination[];
+hsnCode?: string;
+gst?: number;
+}
+
+export default function ProductPage(props: { params: Promise<{ id: string }> }) {
+const { id } = React.use(props.params);
+const [reviews, setReviews] = useState([]);
+const [product, setProduct] = useState<Product | null>(null);
+const [isLoading, setIsLoading] = useState(true);
+const [customizationSelections, setCustomizationSelections] = useState<Record<string, string>>({});
+const [customizationText, setCustomizationText] = useState("");
+const [currentMediaIndex, setCurrentMediaIndex] = useState(0);
+const [allMedia, setAllMedia] = useState<Array<{type: 'image' | 'video', url: string}>>([]);
+const [quantity, setQuantity] = useState(1);
+const [isAddingToCart, setIsAddingToCart] = useState(false);
+const [itemAddedToCart, setItemAddedToCart] = useState(false);
+const [customizationEnabled, setCustomizationEnabled] = useState(false);
+const [activeTab, setActiveTab] = useState("description");
+
+// New state for enhanced UI
+const [isWishlisted, setIsWishlisted] = useState(false);
+const [showImageModal, setShowImageModal] = useState(false);
+
+// Variant state
+const [selectedVariants, setSelectedVariants] = useState<Record<string, string>>({});
+const [selectedCombination, setSelectedCombination] = useState<VariantCombination | null>(null);
+const [variantImages, setVariantImages] = useState<Array<{type: 'image' | 'video', url: string}>>([]);
+
+// Share dialog state
+const [shareDialogOpen, setShareDialogOpen] = useState(false);
+const [isCopied, setIsCopied] = useState(false);
+const productLinkRef = useRef<HTMLInputElement>(null);
+
+const { toast } = useToast();
+const { user } = useAuth();
+const { addToCart } = useCart();
+const router = useRouter();
+const { toggleWishlistItem, isInWishlist } = useWishlist();
+
+// Reference for scrolling thumbnails
+const thumbnailsContainerRef = useRef<HTMLDivElement>(null);
+const mainImageRef = useRef<HTMLDivElement>(null);
+
+// Parse customization options from string to structured format
+const parseCustomizationOptions = (optionsStr?: string) => {
+if (!optionsStr) return [];
+return optionsStr.split(';').map(optionGroup => {
+const [name, valuesStr] = optionGroup.split(':').map(s => s.trim());
+const values = valuesStr?.split(',').map(v => v.trim()) || [];
+return { name, values };
+}).filter(group => group.name && group.values.length > 0);
+};
+
+useEffect(() => {
+const fetchProduct = async () => {
+setIsLoading(true);
+try {
+if (!id) {
+toast({
+title: "Error",
+description: "Product not found.",
+variant: "destructive"
+});
+return;
+}
+
+const productDocRef = doc(db, 'products', id);
+const productDoc = await getDoc(productDocRef);
+
+if (!productDoc.exists()) {
+toast({
+title: "Error",
+description: "Product not found.",
+variant: "destructive"
+});
+return;
+}
+
+const productData = productDoc.data();
+const processedProduct: Product = {
+id: productDoc.id,
+...productData,
+price: typeof productData.price === 'number' ? productData.price : Number(productData.price) || 0,
+originalPrice: productData.originalPrice ? Number(productData.originalPrice) : undefined,
+stock: typeof productData.stock === 'number' ? productData.stock : Number(productData.stock) || 0,
+images: productData.images || [],
+thumbnails: productData.thumbnails || [],
+videos: productData.videos || [],
+hasCustomization: productData.hasCustomization || false,
+customizationOptions: productData.customizationOptions || '',
+hasVariants: productData.hasVariants || false,
+variants: productData.variants || [],
+variantCombinations: productData.variantCombinations || [],
+};
+
+setProduct(processedProduct);
+
+// Fetch reviews for the current product
+fetchReviews(); // <-- Added this line here
+
+// Check if product is in wishlist
+if (processedProduct.id && user) {
+setIsWishlisted(isInWishlist?.(processedProduct.id) || false);
+}
+
+// Initialize default variant selection if variants exist
+if (processedProduct.hasVariants && processedProduct.variants.length > 0) {
+const initialSelection: Record<string, string> = {};
+processedProduct.variants.forEach(variant => {
+if (variant.options.length > 0) {
+initialSelection[variant.name] = variant.options[0];
+}
+});
+setSelectedVariants(initialSelection);
+
+// Find matching combination based on initial selection
+findMatchingCombination(initialSelection, processedProduct.variantCombinations || []);
+}
+} catch (error) {
+console.error("Error fetching product:", error);
+toast({
+title: "Error",
+description: "Failed to load product. Please try again later.",
+variant: "destructive"
+});
+} finally {
+setIsLoading(false);
+}
+};
+
+// Function to fetch reviews for the current product
+const fetchReviews = async () => {
+try {
+const reviewsRef = collection(db, 'reviews');
+const q = query(reviewsRef, where('productId', '==', id));
+const querySnapshot = await getDocs(q);
+const reviewsData = querySnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+setReviews(reviewsData);
+} catch (error) {
+console.error("Error fetching reviews:", error);
+}
+};
+
+fetchProduct();
+}, [id, toast, user, isInWishlist]);
+
+
+// Find matching variant combination based on selected options
+const findMatchingCombination = (selections: Record<string, string>, combinations: VariantCombination[]) => {
+// Convert selections to sorted string for comparison (e.g. "Color:Red/Size:XL")
+const selectionKeys = Object.keys(selections).sort();
+const selectionStr = selectionKeys.map(key => `${key}:${selections[key]}`).join('/');
+
+// Find matching combination
+const match = combinations.find(combo => {
+const comboKeys = Object.keys(combo.attributes).sort();
+const comboStr = comboKeys.map(key => `${key}:${combo.attributes[key]}`).join('/');
+return selectionStr === comboStr;
+});
+
+setSelectedCombination(match || null);
+};
+
+// Handle variant selection change
+const handleVariantChange = (variantName: string, optionValue: string) => {
+const newSelections = {
+...selectedVariants,
+[variantName]: optionValue
+};
+
+setSelectedVariants(newSelections);
+
+if (product?.variantCombinations) {
+findMatchingCombination(newSelections, product.variantCombinations);
+}
+};
+
+const handleAddToCart = async (options?: { isBuyNow?: boolean }) => {
+if (!product) return;
+
+// Check customization requirements
+if (customizationEnabled && product.hasCustomization) {
+const options = parseCustomizationOptions(product.customizationOptions);
+if (options.some(option => !customizationSelections[option.name])) {
+toast({
+title: "Customization Required",
+description: "Please select all customization options.",
+variant: "destructive",
+});
+return;
+}
+}
+
+// Check variant requirements
+if (product.hasVariants && !selectedCombination) {
+toast({
+title: "Variant Selection Required",
+description: "Please select valid product options.",
+variant: "destructive",
+});
+return;
+}
+
+setIsAddingToCart(true);
+
+try {
+// Use variant price if available
+let price = selectedCombination?.price ?? product.price;
+
+// Add customization fee if enabled
+if (customizationEnabled) {
+price += 50; // Add 50 rupees for customization
+}
+
+const variantCombinationId = selectedCombination?.id;
+const variantName = selectedCombination?.combinationString;
+const productImage = selectedCombination?.images?.[0] ?? product.images?.[0];
+
+// Create a properly structured cart item object
+const cartItem = {
+productId: product.id,
+quantity: quantity,
+price: selectedCombination?.price ?? product.price, // Base price only
+productName: product.name,
+productImage: selectedCombination?.images?.[0] ?? product.images?.[0],
+hasCustomization: customizationEnabled,
+personalization: customizationEnabled ? {
+totalExtraCost: 50,
+customMessage: customizationText,
+options: [] // Optional
+} : undefined,
+variantCombinationId: selectedCombination?.id,
+variantName: selectedCombination?.combinationString,
+hsnCode: product.hsnCode || '',
+gst: product.gst || 0,
+};
+console.log("Hello",product.gst);
+
+// Add the item to cart
+addToCart(cartItem, 0, { skipRefresh: true }); // Pass 0 as the quantity since it's already included in the cartItem
+setItemAddedToCart(true);
+
+toast({
+title: "Added to Cart",
+description: `${product.name} ${variantName ? `(${variantName})` : ''} has been added to your cart.`,
+});
+} catch (error) {
+console.error("Failed to add item to cart:", error);
+toast({
+title: "Error",
+description: "Failed to add item to cart. Please try again.",
+variant: "destructive",
+});
+} finally {
+setIsAddingToCart(false);
+}
+};
+
+const handleBuyNow = async () => {
+if (!product) return;
+
+// Check customization requirements
+if (customizationEnabled && product.hasCustomization) {
+const options = parseCustomizationOptions(product.customizationOptions);
+if (options.some(option => !customizationSelections[option.name])) {
+toast({
+title: "Customization Required",
+description: "Please select all customization options.",
+variant: "destructive"
+});
+return;
+}
+}
+
+// Check variant requirements
+if (product.hasVariants && !selectedCombination) {
+toast({
+title: "Variant Selection Required",
+description: "Please select valid product options.",
+variant: "destructive",
+});
+return;
+}
+
+try {
+await handleAddToCart({ skipRefresh: true});
+
+router.push('/checkout/address');
+} catch (error) {
+console.error("Error processing buy now:", error);
+toast({
+title: "Error",
+description: "Failed to process your request. Please try again.",
+variant: "destructive"
+});
+}
+};
+
+const handleWishlist = () => {
+if (!product) return;
+setIsWishlisted(!isWishlisted);
+toggleWishlistItem(product);
+
+toast({
+title: isWishlisted ? "Removed from Wishlist" : "Added to Wishlist",
+description: isWishlisted ?
+`${product.name} has been removed from your wishlist` :
+`${product.name} has been added to your wishlist`,
+});
+};
+
+const handleShareProduct = () => {
+setShareDialogOpen(true);
+setIsCopied(false);
+};
+
+const handleCopyLink = () => {
+if (productLinkRef.current) {
+productLinkRef.current.select();
+document.execCommand('copy');
+setIsCopied(true);
+setTimeout(() => setIsCopied(false), 2000);
+
+toast({
+title: "Link Copied",
+description: "Product link copied to clipboard",
+});
+}
+};
+
+const handleCustomizationChange = (optionName: string, value: string) => {
+setCustomizationSelections(prev => ({
+...prev,
+[optionName]: value
+}));
+};
+
+const nextMedia = () => {
+const mediaArray = variantImages.length > 0 ? variantImages : allMedia;
+if (mediaArray.length > 0) {
+setCurrentMediaIndex((prevIndex) =>
+prevIndex === mediaArray.length - 1 ? 0 : prevIndex + 1
+);
+}
+};
+
+const prevMedia = () => {
+const mediaArray = variantImages.length > 0 ? variantImages : allMedia;
+if (mediaArray.length > 0) {
+setCurrentMediaIndex((prevIndex) =>
+prevIndex === 0 ? mediaArray.length - 1 : prevIndex - 1
+);
+}
+};
+
+const goToMedia = (index: number) => {
+const mediaArray = variantImages.length > 0 ? variantImages : allMedia;
+if (index >= 0 && index < mediaArray.length) {
+setCurrentMediaIndex(index);
+}
+};
+
+const toggleImageModal = () => {
+setShowImageModal(!showImageModal);
+};
+
+// Combine images and videos into a single media array
+useEffect(() => {
+if (product) {
+let media: Array<{type: 'image' | 'video', url: string}> = [];
+
+// If there's a selected variant with images, use those
+if (selectedCombination?.images?.length) {
+selectedCombination.images.forEach(url => media.push({ type: 'image', url }));
+setVariantImages(media);
+} else {
+// Otherwise use the product's default images/videos
+if (product.images?.length) {
+product.images.forEach(url => media.push({ type: 'image', url }));
+}
+
+if (product.videos?.length) {
+product.videos.forEach(url => media.push({ type: 'video', url }));
+}
+
+setAllMedia(media);
+setVariantImages([]);
+}
+
+// Reset current media index when media changes
+setCurrentMediaIndex(0);
+}
+}, [product, selectedCombination]);
+
+// Ensure thumbnail is visible when active
+useEffect(() => {
+if (thumbnailsContainerRef.current) {
+const container = thumbnailsContainerRef.current;
+const thumbnailWidth = 64;
+const scrollPosition = currentMediaIndex * thumbnailWidth;
+container.scrollLeft = scrollPosition - (container.clientWidth / 2) + (thumbnailWidth / 2);
+}
+}, [currentMediaIndex]);
+
+const renderCustomizationOptions = (product: Product) => {
+if (!product.hasCustomization || !product.customizationOptions) return null;
+
+const options = parseCustomizationOptions(product.customizationOptions);
+
+return (
+<div className="space-y-4">
+{options.map((option, index) => (
+<div key={index} className="space-y-2">
+<Label className="text-sm font-medium">{option.name}</Label>
+<RadioGroup
+value={customizationSelections[option.name] || ''}
+onValueChange={(value) => handleCustomizationChange(option.name, value)}
+>
+<div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+{option.values.map((value, i) => (
+<div
+key={i}
+className={`flex items-center space-x-2 border p-2 rounded-md cursor-pointer transition-all
+${customizationSelections[option.name] === value
+? 'bg-blue-50 border-blue-300 shadow-sm'
+: 'hover:bg-gray-50'}`}
+onClick={() => handleCustomizationChange(option.name, value)}
+>
+<RadioGroupItem value={value} id={`${option.name}-${value}`} />
+<Label htmlFor={`${option.name}-${value}`} className="cursor-pointer w-full">{value}</Label>
+</div>
+))}
+</div>
+</RadioGroup>
+</div>
+))}
+</div>
+);
+};
+
+// Updated variant display to match reference images
+const renderVariantOptions = (product: Product) => {
+if (!product.hasVariants || !product.variants || product.variants.length === 0) return null;
+
+return (
+<div className="space-y-4 border rounded-md p-4 bg-gray-50/70">
+<h3 className="font-medium mb-2">Options</h3>
+{product.variants.map((variant) => {
+// Check if we might have images for this variant type (for visual display)
+const hasVariantImages = product.variantCombinations?.some(combo =>
+combo.attributes[variant.name] && combo.images?.length
+);
+
+return (
+<div key={variant.id} className="space-y-2">
+<Label className="text-sm font-medium">{variant.name}</Label>
+
+{hasVariantImages ? (
+// Visual variant selector (like Image 2)
+<div className="grid grid-cols-4 gap-2">
+{product.variantCombinations
+?.filter(combo => combo.attributes[variant.name])
+.map((combo, i) => {
+const optionValue = combo.attributes[variant.name];
+const isSelected = selectedVariants[variant.name] === optionValue;
+return (
+<motion.div
+key={i}
+whileHover={{ scale: 1.03 }}
+whileTap={{ scale: 0.98 }}
+className={`border rounded-md overflow-hidden cursor-pointer transition-all duration-200
+${isSelected
+? 'border-blue-500 ring-2 ring-blue-200 shadow-md'
+: 'border-gray-200 hover:border-gray-300 hover:shadow-sm'}`}
+onClick={() => handleVariantChange(variant.name, optionValue)}
+>
+{combo.images?.[0] ? (
+<div className="relative">
+<img
+src={combo.images[0]}
+alt={optionValue}
+className="w-full h-16 object-cover"
+/>
+<div className="p-1 text-xs text-center border-t">
+<div className="font-medium truncate">{optionValue}</div>
+<div className="text-xs text-gray-600">â‚¹{combo.price.toLocaleString()}</div>
+{(combo.originalPrice && combo.originalPrice > combo.price) && (
+<div className="text-xs line-through text-gray-400">
+â‚¹{combo.originalPrice.toLocaleString()}
+</div>
+)}
+</div>
+</div>
+) : (
+<div className="p-2 text-center">
+<div className="font-medium">{optionValue}</div>
+<div className="text-sm">â‚¹{combo.price.toLocaleString()}</div>
+</div>
+)}
+</motion.div>
+);
+})}
+</div>
+) : (
+<>
+<Select
+value={selectedVariants[variant.name] || ''}
+onValueChange={(value) => handleVariantChange(variant.name, value)}
+>
+<SelectTrigger className="w-full">
+<SelectValue placeholder={`Select ${variant.name}`} />
+</SelectTrigger>
+<SelectContent>
+{variant.options.map((option) => (
+<SelectItem key={option} value={option}>
+{option}
+</SelectItem>
+))}
+</SelectContent>
+</Select>
+
+{selectedVariants[variant.name] && (
+<Badge variant="outline" className="mt-1 bg-blue-50 text-blue-700 border-blue-200">
+{selectedVariants[variant.name]}
+</Badge>
+)}
+</>
+)}
+</div>
+);
+})}
+
+{selectedCombination && (
+<div className="mt-2 pt-2 border-t">
+<div className="flex justify-between items-center">
+<Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+{selectedCombination.combinationString}
+</Badge>
+{selectedCombination.stock <= 5 && selectedCombination.stock > 0 && (
+<Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200">
+Only {selectedCombination.stock} left
+</Badge>
+)}
+</div>
+</div>
+)}
+</div>
+);
+};
+
+const renderVideoPlayer = (videoUrl: string) => {
+// Handle YouTube URLs
+if (videoUrl.includes('youtube.com') || videoUrl.includes('youtu.be')) {
+let videoId = '';
+
+if (videoUrl.includes('youtube.com/watch')) {
+videoId = new URL(videoUrl).searchParams.get('v') || '';
+} else if (videoUrl.includes('youtu.be/')) {
+videoId = videoUrl.split('youtu.be/')[1]?.split('?')[0] || '';
+}
+
+if (videoId) {
+return (
+<div className="w-full h-full relative">
+<iframe
+src={`https://www.youtube.com/embed/${videoId}`}
+className="absolute inset-0 w-full h-full rounded-md"
+allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+allowFullScreen
+title="Product Video"
+/>
+</div>
+);
+}
+}
+
+// Default video player for direct video URLs
+return (
+<video
+src={videoUrl}
+controls
+className="w-full h-full rounded-md"
+style={{ maxHeight: '500px' }}
+/>
+);
+};
+
+// Render highlight features
+const renderHighlights = () => {
+return (
+<div className="grid grid-cols-3 gap-2 my-6">
+<div className="flex flex-col items-center p-3 text-center border rounded-md bg-gray-50/70">
+<TruckIcon className="h-6 w-6 text-blue-600 mb-2" />
+<div className="text-sm font-medium">Free Shipping</div>
+<div className="text-xs text-gray-500">Orders above â‚¹599</div>
+</div>
+<div className="flex flex-col items-center p-3 text-center border rounded-md bg-gray-50/70">
+<RotateCcw className="h-6 w-6 text-blue-600 mb-2" />
+<div className="text-sm font-medium">Easy Returns</div>
+<div className="text-xs text-gray-500">7-day return policy</div>
+</div>
+<div className="flex flex-col items-center p-3 text-center border rounded-md bg-gray-50/70">
+<Shield className="h-6 w-6 text-blue-600 mb-2" />
+<div className="text-sm font-medium">Secure Payment</div>
+<div className="text-xs text-gray-500">100% secure checkout</div>
+</div>
+</div>
+);
+};
+
+// Show loading state
+if (isLoading) {
+return (
+<div className="container mx-auto px-4 py-8">
+<div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+{/* Left column skeleton */}
+<div className="space-y-4">
+<Skeleton className="h-96 w-full rounded-lg" />
+<div className="flex space-x-2 overflow-x-auto">
+{[1, 2, 3, 4].map((i) => (
+<Skeleton key={i} className="h-16 w-16 flex-shrink-0 rounded-md" />
+))}
+</div>
+</div>
+
+{/* Right column skeleton */}
+<div className="space-y-4">
+<Skeleton className="h-8 w-3/4" />
+<Skeleton className="h-6 w-1/4" />
+<div className="space-y-2 mt-4">
+<Skeleton className="h-4 w-full" />
+<Skeleton className="h-4 w-full" />
+<Skeleton className="h-4 w-3/4" />
+</div>
+<div className="grid grid-cols-3 gap-2 mt-6">
+<Skeleton className="h-20 w-full rounded-md" />
+<Skeleton className="h-20 w-full rounded-md" />
+<Skeleton className="h-20 w-full rounded-md" />
+</div>
+<Skeleton className="h-40 w-full rounded-md mt-4" />
+<div className="flex space-x-2 mt-4">
+<Skeleton className="h-10 w-1/2" />
+<Skeleton className="h-10 w-1/2" />
+</div>
+</div>
+</div>
+</div>
+);
+}
+
+// Show error state if product not found
+if (!product) {
+return (
+<div className="container mx-auto px-4 py-8 text-center">
+<div className="p-8 rounded-lg border border-gray-200 shadow-sm bg-white">
+<h2 className="text-2xl font-bold mb-4">Product Not Found</h2>
+<p className="text-gray-600 mb-6">The product you are looking for might have been removed or is temporarily unavailable.</p>
+<Button onClick={() => router.push('/shop')}>
+Continue Shopping
+</Button>
+</div>
+</div>
+);
+}
+
+const mediaArray = variantImages.length > 0 ? variantImages : allMedia;
+const currentMedia = mediaArray[currentMediaIndex] || null;
+
+// Calculate price display
+let displayPrice = selectedCombination?.price ?? product.price;
+if (customizationEnabled) {
+displayPrice += 50; // Add 50 rupees for customization
+}
+const displayOriginalPrice = selectedCombination?.originalPrice ?? product.originalPrice;
+const discountPercentage = displayOriginalPrice && displayOriginalPrice > displayPrice
+? Math.round(((displayOriginalPrice - displayPrice) / displayOriginalPrice) * 100)
+: 0;
+
+// Generate product link for sharing
+const productUrl = typeof window !== 'undefined'
+? `${window.location.origin}/product/${product.id}`
+: `/product/${product.id}`;
+
+return (
+<div className="bg-white">
+<div className="container mx-auto px-4 py-8">
+{/* Share Button - At the top */}
+
+<div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+{/* Left Column - Product Images/Videos */}
+<div className="md:sticky md:top-4 md:self-start md:h-[calc(100vh-4rem)] space-y-4 overflow-y-auto pb-4">
+{/* Main Image/Video Display */}
+<motion.div
+ref={mainImageRef}
+className="relative border rounded-lg bg-white h-96 flex items-center justify-center overflow-hidden cursor-zoom-in"
+onClick={toggleImageModal}
+whileHover={{ scale: 1.005 }}
+initial={{ opacity: 0 }}
+animate={{ opacity: 1 }}
+transition={{ duration: 0.3 }}
+>
+{mediaArray.length > 0 ? (
+<>
+<AnimatePresence mode="wait">
+<motion.div
+key={currentMediaIndex}
+initial={{ opacity: 0 }}
+animate={{ opacity: 1 }}
+exit={{ opacity: 0 }}
+transition={{ duration: 0.3 }}
+className="w-full h-full flex items-center justify-center"
+>
+{currentMedia?.type === 'video' ? (
+renderVideoPlayer(currentMedia.url)
+) : (
+<img
+src={currentMedia?.url || '/placeholder-image.jpg'}
+alt={product.name}
+className="object-contain max-h-full max-w-full"
+/>
+)}
+</motion.div>
+</AnimatePresence>
+
+{/* Navigation Arrows */}
+{mediaArray.length > 1 && (
+<>
+<button
+onClick={(e) => {
+e.stopPropagation();
+prevMedia();
+}}
+className="absolute left-2 p-1 rounded-full bg-white/80 text-gray-800 shadow-md hover:bg-white transition-all"
+>
+<ChevronLeft className="h-6 w-6" />
+</button>
+<button
+onClick={(e) => {
+e.stopPropagation();
+nextMedia();
+}}
+className="absolute right-2 p-1 rounded-full bg-white/80 text-gray-800 shadow-md hover:bg-white transition-all"
+>
+<ChevronRight className="h-6 w-6" />
+</button>
+</>
+)}
+</>
+) : (
+<div className="flex items-center justify-center h-full w-full bg-gray-100 rounded-lg">
+<ImagePlus className="h-12 w-12 text-gray-400" />
+<p className="text-gray-500 ml-2">No images available</p>
+</div>
+)}
+</motion.div>
+
+{/* Thumbnails */}
+{mediaArray.length > 1 && (
+<div
+ref={thumbnailsContainerRef}
+className="flex space-x-2 overflow-x-auto pb-2 scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100"
+>
+{mediaArray.map((media, index) => (
+<div
+key={index}
+onClick={() => goToMedia(index)}
+className={`flex-shrink-0 w-16 h-16 border rounded cursor-pointer overflow-hidden transition-all
+${currentMediaIndex === index
+? 'border-blue-500 ring-2 ring-blue-200'
+: 'border-gray-200 hover:border-gray-300'}`}
+>
+{media.type === 'video' ? (
+<div className="relative w-full h-full bg-gray-100">
+<Film className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-6 h-6 text-gray-500" />
+</div>
+) : (
+<img
+src={media.url}
+alt={`Thumbnail ${index}`}
+className="w-full h-full object-cover"
+/>
+)}
+</div>
+))}
+</div>
+)}
+</div>
+
+{/* Right Column - Product Info */}
+<div className="space-y-4">
+{/* Product Name and Badges */}
+<div>
+<h1 className="text-2xl font-bold text-gray-900">{product.name}</h1>
+<div className="flex items-center space-x-2 mt-1">
+{product.category && (
+<Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200">
+{product.category}
+</Badge>
+)}
+<ProductReviews productId={product.id} />
+{product.stock <= 5 && product.stock > 0 && !selectedCombination && (
+<Badge variant="outline" className="bg-yellow-50 text-yellow-700 border-yellow-200">
+Only {product.stock} left
+</Badge>
+)}
+{product.stock === 0 && !selectedCombination && (
+<Badge variant="outline" className="bg-red-50 text-red-700 border-red-200">
+Out of Stock
+</Badge>
+)}
+</div>
+</div>
+
+{/* Price Information */}
+<div className="flex items-center space-x-2 mt-2">
+<div className="text-2xl font-bold text-gray-900">â‚¹{displayPrice.toLocaleString()}</div>
+{displayOriginalPrice && displayOriginalPrice > displayPrice && (
+<>
+<div className="text-gray-500 line-through">â‚¹{displayOriginalPrice.toLocaleString()}</div>
+<Badge className="bg-green-100 text-green-800 border-green-200">
+{discountPercentage}% OFF
+</Badge>
+</>
+)}
+</div>
+{/* Highlights */}
+{renderHighlights()}
+
+{/* Variants */}
+{renderVariantOptions(product)}
+
+{/* Customization Toggle */}
+{product.hasCustomization && (
+<div className="border rounded-md p-4 bg-gray-50/70 mt-4">
+<div className="flex items-center justify-between mb-2">
+<Label htmlFor="customization-toggle" className="font-medium">
+Add Customization (+â‚¹50)
+</Label>
+<Switch
+id="customization-toggle"
+checked={customizationEnabled}
+onCheckedChange={setCustomizationEnabled}
+/>
+</div>
+{customizationEnabled && (
+<div className="mt-4 space-y-4">
+{renderCustomizationOptions(product)}
+<div className="space-y-2">
+<Label htmlFor="customization-text">Additional Instructions</Label>
+<Textarea
+id="customization-text"
+placeholder="Enter your name (max length with spaces is 15 characters)..."
+value={customizationText}
+onChange={(e) => {
+const newText = e.target.value;
+if (newText.length <= 15) {
+setCustomizationText(newText);
+}
+}}
+maxLength={15}
+className="resize-none"
+/>
+<p className="text-sm text-muted-foreground">
+{customizationText.length}/15 characters
+</p>
+</div>
+</div>
+)}
+
+</div>
+)}
+
+{/* Quantity Selector */}
+<div className="mt-6">
+<Label className="text-sm font-medium">Quantity</Label>
+<div className="flex items-center mt-1">
+<Button
+type="button"
+variant="outline"
+size="icon"
+onClick={() => setQuantity(Math.max(1, quantity - 1))}
+disabled={quantity <= 1}
+>
+<Minus className="h-4 w-4" />
+</Button>
+<div className="w-14 text-center">{quantity}</div>
+<Button
+type="button"
+variant="outline"
+size="icon"
+onClick={() => setQuantity(Math.min(10, quantity + 1))} // Limit quantity to 10
+disabled={quantity >= 10 && product.stock === 0} // Disable button when quantity is 10 or more
+>
+<Plus className="h-4 w-4" />
+</Button>
+</div>
+</div>
+
+{/* Add to Cart and Buy Now Buttons */}
+<div className="grid grid-cols-2 gap-4 mt-6">
+<Button
+variant="outline"
+size="lg"
+className="w-full text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 shadow-md rounded-full"
+onClick={() => handleAddToCart({ skipRefresh: true })}
+disabled={isAddingToCart || product.stock <= 0}
+>
+<ShoppingCart className="mr-2 h-5 w-5" />
+Add to Cart
+</Button>
+<Button
+variant="default"
+type='button'
+size="lg"
+className="w-full text-white bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 shadow-md rounded-full"
+onClick={handleBuyNow}
+disabled={isAddingToCart || product.stock <= 0}
+>
+Buy Now
+</Button>
+</div>
+
+{/* Wishlist Button */}
+<div className="grid grid-cols-2 gap-4 mt-6">
+<Button
+variant="outline"
+type='button'
+size="lg"
+className="w-full text-gray-800 bg-white border border-gray-300 hover:text-white hover:bg-gradient-to-r hover:from-purple-500 hover:to-pink-500 transition-all duration-300 ease-in-out shadow-sm rounded-full"
+onClick={handleWishlist}
+>
+<Heart
+className={`mr-2 h-5 w-5 transition-colors duration-200 ${
+isWishlisted ? 'fill-red-500 text-red-500' : 'text-gray-500'
+}`}
+/>
+{isWishlisted ? 'Remove from Wishlist' : 'Add to Wishlist'}
+</Button>
+<div className="flex justify-end mb-4">
+<Button
+variant="outline"
+type='button'
+size="lg"
+onClick={handleShareProduct}
+className="w-full text-gray-800 bg-white border border-gray-300 hover:text-white hover:bg-gradient-to-r hover:from-purple-500 hover:to-pink-500 transition-all duration-300 ease-in-out shadow-sm rounded-full"
+>
+<Share2 className="h-4 w-4" />
+Share Product
+</Button>
+</div>
+</div>
+
+{/* Move Tabs (Description, Shipping, Returns, Reviews) here */}
+<div className="container mx-auto px-4 py-4">
+
+
+<div className="mx-auto max-w-screen-xl">
+<Tabs defaultValue="description" value={activeTab} onValueChange={setActiveTab}>
+<TabsList className="w-full flex bg-gray-50 rounded-t-md border-b">
+<TabsTrigger value="description" className="flex-1">Description</TabsTrigger>
+<TabsTrigger value="shipping" className="flex-1">Shipping</TabsTrigger>
+<TabsTrigger value="returns" className="flex-1">Returns</TabsTrigger>
+<TabsTrigger value="reviews" className="flex-1">Reviews</TabsTrigger>
+</TabsList>
+<div className="w-full mt-8">
+
+
+<TabsContent value="description" className="p-4">
+<div className="prose max-w-none">
+<p className="whitespace-pre-line">{product.description || 'No description available for this product.'}</p>
+</div>
+</TabsContent>
+<TabsContent value="shipping" className="p-4">
+<div className="space-y-4">
+<div className="flex items-start gap-3">
+<TruckIcon className="h-5 w-5 text-blue-600 mt-0.5" />
+<div>
+<h4 className="font-medium">Free Standard Shipping</h4>
+<p className="text-sm text-gray-600">On orders above â‚¹599</p>
+</div>
+</div>
+<Separator />
+<div>
+<h4 className="font-medium mb-2">Estimated Delivery</h4>
+<p className="text-sm text-gray-600">5 - 7 business days</p>
+</div>
+</div>
+</TabsContent>
+<TabsContent value="returns" className="p-4">
+<div className="space-y-4">
+<div className="flex items-start gap-3">
+<RotateCcw className="h-5 w-5 text-blue-600 mt-0.5" />
+<div>
+<h4 className="font-medium">7-Day Return Policy</h4>
+<p className="text-sm text-gray-600">Return within 7 days of delivery</p>
+</div>
+</div>
+<Separator />
+<div>
+<h4 className="font-medium mb-2">Return Process</h4>
+<p className="text-sm text-gray-600">
+1. Contact customer support to initiate return<br />
+2. Package the item in its original packaging<br />
+3. Our courier partner will pick up the item
+</p>
+</div>
+<Separator />
+<div>
+<h4 className="font-medium mb-2">Non-Returnable Items</h4>
+<p className="text-sm text-gray-600">Customized products cannot be returned unless damaged or defective</p>
+</div>
+</div>
+</TabsContent>
+<TabsContent value="reviews" className="p-4">
+<div className="mt-6">
+<h2 className="text-2xl font-bold text-gray-800 mb-4">Customer Reviews</h2>
+{reviews.length > 0 ? (
+reviews.map((review) => (
+<div
+key={review.id}
+className="p-5 bg-white border border-gray-200 rounded-2xl shadow-md mb-4 transition hover:shadow-lg"
+>
+<div className="flex items-center justify-between">
+<p className="font-semibold text-gray-900 text-base">{review.userName}</p>
+<div className="flex items-center space-x-1">
+{[...Array(5)].map((_, index) => (
+<Star
+key={index}
+className={`w-5 h-5 ${
+index < review.rating ? "text-yellow-400 fill-yellow-400" : "text-gray-300"
+}`}
+/>
+))}
+</div>
+</div>
+<p className="text-sm text-gray-700 font-medium mt-2">{review.title}</p>
+<p className="text-sm text-gray-600 mt-1 leading-relaxed">{review.comment}</p>
+</div>
+))
+) : (
+<p className="text-gray-500 text-sm">No reviews yet.</p>
+)}
+</div>
+</TabsContent>
+</div>
+</Tabs>
+</div>
+</div>
+
+</div>
+</div>
+
+
+
+{/* Image Modal */}
+<Dialog open={showImageModal} onOpenChange={setShowImageModal}>
+<DialogContent className="max-w-4xl">
+<DialogHeader>
+<DialogTitle>{product.name}</DialogTitle>
+</DialogHeader>
+<div className="relative h-[60vh] w-full">
+{currentMedia?.type === 'video' ? (
+renderVideoPlayer(currentMedia.url)
+) : (
+<img
+src={currentMedia?.url || '/placeholder-image.jpg'}
+alt={product.name}
+className="w-full h-full object-contain"
+/>
+)}
+
+{mediaArray.length > 1 && (
+<>
+<button
+onClick={(e) => {
+e.stopPropagation();
+prevMedia();
+}}
+className="absolute left-4 top-1/2 transform -translate-y-1/2 p-2 rounded-full bg-white/80 text-gray-800 shadow-md hover:bg-white transition-all"
+>
+<ChevronLeft className="h-6 w-6" />
+</button>
+<button
+onClick={(e) => {
+e.stopPropagation();
+nextMedia();
+}}
+className="absolute right-4 top-1/2 transform -translate-y-1/2 p-2 rounded-full bg-white/80 text-gray-800 shadow-md hover:bg-white transition-all"
+>
+<ChevronRight className="h-6 w-6" />
+</button>
+</>
+)}
+</div>
+<div className="flex space-x-2 overflow-x-auto mt-4">
+{mediaArray.map((media, index) => (
+<div
+key={index}
+onClick={() => goToMedia(index)}
+className={`flex-shrink-0 w-16 h-16 border rounded cursor-pointer overflow-hidden transition-all
+${currentMediaIndex === index
+? 'border-blue-500 ring-2 ring-blue-200'
+: 'border-gray-200 hover:border-gray-300'}`}
+>
+{media.type === 'video' ? (
+<div className="relative w-full h-full bg-gray-100">
+<Film className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-6 h-6 text-gray-500" />
+</div>
+) : (
+<img
+src={media.url}
+alt={`Thumbnail ${index}`}
+className="w-full h-full object-cover"
+/>
+)}
+</div>
+))}
+</div>
+</DialogContent>
+</Dialog>
+
+{/* Share Dialog */}
+<Dialog open={shareDialogOpen} onOpenChange={setShareDialogOpen}>
+<DialogContent className="sm:max-w-md">
+<DialogHeader>
+<DialogTitle>Share Product</DialogTitle>
+<DialogDescription>
+Copy the link below to share this product with others.
+</DialogDescription>
+</DialogHeader>
+<div className="flex items-center space-x-2">
+<div className="grid flex-1 gap-2">
+<Label htmlFor="product-link" className="sr-only">
+Product Link
+</Label>
+<Input
+ref={productLinkRef}
+id="product-link"
+value={productUrl}
+readOnly
+className="w-full"
+/>
+</div>
+<Button type="button" size="sm" onClick={handleCopyLink}>
+{isCopied ? (
+<Check className="h-4 w-4 mr-1" />
+) : (
+<Copy className="h-4 w-4 mr-1" />
+)}
+{isCopied ? "Copied" : "Copy"}
+</Button>
+</div>
+</DialogContent>
+</Dialog>
+</div>
+</div>
+);
+}
