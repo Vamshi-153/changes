@@ -1,0 +1,261 @@
+﻿'use client';
+
+import type { Product } from '@/types';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { useToast } from './use-toast';
+
+export interface CartStorageItem {
+productId: string;
+quantity: number;
+price?: number;
+productName?: string;
+productImage?: string;
+customizationSelections?: Record<string, string>;
+customizationText?: string;
+variantCombinationId?: string;
+variantName?: string;
+personalization?: {
+options: Array<{
+name: string;
+value: string;
+extraCost?: number;
+}>;
+totalExtraCost: number;
+};
+hsnCode?: string;
+gst?: number;
+}
+
+const CART_STORAGE_KEY = 'nxtbazaar-cart';
+
+export function useCart() {
+const [cartItems, setCartItems] = useState<CartStorageItem[]>([]);
+const [isCartInitialized, setIsCartInitialized] = useState(false);
+const { toast } = useToast();
+const isInitializing = useRef(false);
+const isSaving = useRef(false);
+
+// Initialize cart from localStorage when component mounts
+useEffect(() => {
+const initializeCart = () => {
+if (typeof window !== 'undefined' && !isInitializing.current) {
+isInitializing.current = true;
+try {
+const localCart = localStorage.getItem(CART_STORAGE_KEY);
+if (localCart && localCart !== 'undefined' && localCart !== 'null') {
+const parsedCart = JSON.parse(localCart);
+if (Array.isArray(parsedCart)) {
+setCartItems(parsedCart);
+} else {
+setCartItems([]);
+}
+} else {
+setCartItems([]);
+}
+} catch (e) {
+setCartItems([]);
+localStorage.removeItem(CART_STORAGE_KEY);
+}
+setIsCartInitialized(true);
+}
+};
+
+if (!isCartInitialized && !isInitializing.current) {
+initializeCart();
+}
+}, []);
+
+// Sync to localStorage when cart updates
+useEffect(() => {
+if (isCartInitialized && typeof window !== 'undefined' && !isSaving.current) {
+isSaving.current = true;
+
+try {
+localStorage.setItem(CART_STORAGE_KEY, JSON.stringify(cartItems));
+window.dispatchEvent(new StorageEvent('storage', {
+key: CART_STORAGE_KEY,
+newValue: JSON.stringify(cartItems),
+}));
+} catch (e) {
+console.error("❌ Error saving cart:", e);
+} finally {
+setTimeout(() => {
+isSaving.current = false;
+}, 0);
+}
+}
+}, [cartItems, isCartInitialized]);
+
+const addToCart = useCallback((
+productOrItem: Product | CartStorageItem,
+quantity: number = 1,
+options?: { skipRefresh?: boolean, isBuyNow?: boolean }
+) => {
+if (!isCartInitialized) {
+console.warn("🛑 Tried to add to cart before cart was initialized");
+return;
+}
+
+// Optional: fallback to latest cart in localStorage to prevent race
+let currentCart: CartStorageItem[] = cartItems;
+if (typeof window !== 'undefined') {
+try {
+const storedCart = localStorage.getItem(CART_STORAGE_KEY);
+if (storedCart) {
+currentCart = JSON.parse(storedCart);
+}
+} catch (e) {
+console.error("Failed to parse fallback localStorage cart:", e);
+}
+}
+
+const isCartItem = 'productId' in productOrItem;
+let newItem: CartStorageItem;
+
+if (isCartItem) {
+newItem = { ...(productOrItem as CartStorageItem) };
+if (!newItem.quantity) newItem.quantity = quantity;
+} else {
+const product = productOrItem as Product;
+newItem = {
+productId: product.id,
+quantity,
+productName: product.name,
+price: product.price,
+productImage: product.images?.[0]
+};
+}
+
+const existingItemIndex = currentCart.findIndex(item =>
+item.productId === newItem.productId &&
+JSON.stringify(item.customizationSelections || {}) === JSON.stringify(newItem.customizationSelections || {}) &&
+item.variantCombinationId === newItem.variantCombinationId
+);
+
+let updatedCart: CartStorageItem[];
+
+if (existingItemIndex >= 0) {
+updatedCart = currentCart.map((item, idx) =>
+idx === existingItemIndex
+? { ...item, quantity: Math.min(item.quantity + newItem.quantity, 10) }
+: item
+);
+} else {
+updatedCart = [...currentCart, { ...newItem, quantity: Math.min(newItem.quantity, 10) }];
+}
+
+setCartItems(updatedCart);
+
+toast({
+title: options?.isBuyNow
+? `${newItem.productName || 'Item'} ready for checkout`
+: `${newItem.productName || 'Item'} added to cart`,
+description: `Quantity: ${newItem.quantity}`
+});
+}, [cartItems, isCartInitialized, toast]);
+
+const removeFromCart = useCallback((productId: string, variantCombinationId?: string, customizationSelections?: Record<string, string>) => {
+setCartItems(prevItems => prevItems.filter(item =>
+!(item.productId === productId &&
+item.variantCombinationId === variantCombinationId &&
+JSON.stringify(item.customizationSelections || {}) === JSON.stringify(customizationSelections || {}))
+));
+toast({
+title: 'Item removed from cart',
+variant: 'destructive',
+});
+}, [toast]);
+
+const updateQuantity = useCallback((productId: string, newQuantityInput: number, variantCombinationId?: string, customizationSelections?: Record<string, string>) => {
+// Read fresh from localStorage to get the most current cart state
+let currentGlobalCart: CartStorageItem[] = [];
+if (typeof window !== 'undefined') {
+const storedCart = localStorage.getItem(CART_STORAGE_KEY);
+if (storedCart) {
+try {
+currentGlobalCart = JSON.parse(storedCart);
+} catch (e) {
+console.error("Failed to parse cart from localStorage in updateQuantity:", e);
+currentGlobalCart = [];
+}
+}
+}
+
+const newQuantity = Math.max(0, Math.min(newQuantityInput, 10));
+
+// Find the item with matching criteria
+const findItem = (items: CartStorageItem[]) =>
+items.find(item =>
+item.productId === productId &&
+item.variantCombinationId === variantCombinationId &&
+JSON.stringify(item.customizationSelections || {}) === JSON.stringify(customizationSelections || {})
+);
+
+const itemWasInCart = findItem(currentGlobalCart);
+const oldQuantity = itemWasInCart?.quantity;
+
+const updatedItems = currentGlobalCart
+.map((item) => {
+if (
+item.productId === productId &&
+item.variantCombinationId === variantCombinationId &&
+JSON.stringify(item.customizationSelections || {}) === JSON.stringify(customizationSelections || {})
+) {
+return { ...item, quantity: newQuantity };
+}
+return item;
+})
+.filter(item => item.quantity > 0);
+
+setCartItems(updatedItems);
+
+const itemIsInCartAfterUpdate = findItem(updatedItems);
+
+if (itemIsInCartAfterUpdate) {
+if (oldQuantity !== newQuantity && newQuantity > 0) {
+toast({
+title: 'Cart updated',
+description: `Quantity set to ${newQuantity}.`
+});
+}
+} else if (itemWasInCart && !itemIsInCartAfterUpdate) {
+toast({
+title: 'Item removed from cart',
+description: 'Quantity set to 0.',
+variant: 'destructive'
+});
+}
+}, [toast]);
+
+const getCartItemCount = useCallback(() => {
+return cartItems.reduce((total, item) => total + item.quantity, 0);
+}, [cartItems]);
+
+const hasItemsInCart = useCallback(() => cartItems.length > 0, [cartItems]);
+
+const clearCart = useCallback(() => {
+setCartItems([]);
+toast({ title: 'Cart cleared' });
+}, [toast]);
+
+const getItemQuantity = useCallback((productId: string, variantCombinationId?: string, customizationSelections?: Record<string, string>) => {
+const item = cartItems.find(cartItem =>
+cartItem.productId === productId &&
+cartItem.variantCombinationId === variantCombinationId &&
+JSON.stringify(cartItem.customizationSelections || {}) === JSON.stringify(customizationSelections || {})
+);
+return item ? item.quantity : 0;
+}, [cartItems]);
+
+return {
+cartItems,
+addToCart,
+removeFromCart,
+updateQuantity,
+getCartItemCount,
+hasItemsInCart,
+clearCart,
+isCartInitialized,
+getItemQuantity,
+};
+}
